@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#071b24" />
+    <title>XIAO 压电 BLE 实时绘图</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">XIAO nRF52840 · PIEZO TELEMETRY</p>
+        <h1>压电信号实时监测</h1>
+        <p class="subtitle">500 Hz 板内采样 · 10 Hz BLE 特征反馈</p>
+      </div>
+      <div class="connection-summary" aria-live="polite">
+        <span id="connectionDot" class="status-dot"></span>
+        <div>
+          <span class="summary-label">蓝牙状态</span>
+          <strong id="connectionText">未连接</strong>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section id="compatibilityBanner" class="notice hidden" role="alert"></section>
+
+      <section class="control-panel card">
+        <div class="button-row primary-actions">
+          <button id="connectButton" class="button button-primary">连接 XIAO</button>
+          <button id="disconnectButton" class="button" disabled>断开</button>
+          <button id="demoButton" class="button button-ghost">界面演示</button>
+        </div>
+        <div class="divider"></div>
+        <div class="button-row acquisition-actions">
+          <button id="startButton" class="button button-success" disabled>连续采集</button>
+          <button id="oneWindowButton" class="button button-accent" disabled>采集 2 秒</button>
+          <button id="stopButton" class="button button-danger" disabled>停止 / 待机</button>
+        </div>
+        <div class="mode-panel">
+          <span>开发板模式</span>
+          <strong id="modeText">低功耗待机</strong>
+          <label class="auto-stop">
+            <input id="autoStopCheckbox" type="checkbox" checked />
+            页面隐藏时自动停止
+          </label>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="实时测量值">
+        <article class="metric-card metric-live">
+          <span>100 ms 均值</span>
+          <strong id="liveMeanValue">—</strong>
+          <small>V</small>
+        </article>
+        <article class="metric-card metric-window">
+          <span>2 s 窗口均值</span>
+          <strong id="windowMeanValue">—</strong>
+          <small>V</small>
+        </article>
+        <article class="metric-card metric-rms">
+          <span>交流 RMS</span>
+          <strong id="acRmsValue">—</strong>
+          <small>V</small>
+        </article>
+        <article class="metric-card metric-peak">
+          <span>峰峰值</span>
+          <strong id="peakToPeakValue">—</strong>
+          <small>V</small>
+        </article>
+      </section>
+
+      <section class="chart-card card">
+        <div class="card-heading">
+          <div>
+            <p class="section-kicker">LIVE ENVELOPE</p>
+            <h2>实时电压</h2>
+          </div>
+          <div class="chart-tools">
+            <label>
+              显示窗口
+              <select id="timeWindowSelect">
+                <option value="10">10 秒</option>
+                <option value="30">30 秒</option>
+                <option value="60" selected>60 秒</option>
+                <option value="120">120 秒</option>
+              </select>
+            </label>
+            <span class="legend"><i class="legend-live"></i>100 ms 均值</span>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="liveChart" aria-label="压电电压实时曲线"></canvas>
+        </div>
+      </section>
+
+      <section class="chart-card card">
+        <div class="card-heading">
+          <div>
+            <p class="section-kicker">WINDOW FEATURES</p>
+            <h2>2 秒窗口特征</h2>
+          </div>
+          <div class="chart-tools legends">
+            <span class="legend"><i class="legend-window"></i>均值</span>
+            <span class="legend"><i class="legend-rms"></i>交流 RMS</span>
+            <span class="legend"><i class="legend-peak"></i>峰峰值</span>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="featureChart" aria-label="窗口均值、交流RMS和峰峰值曲线"></canvas>
+        </div>
+      </section>
+
+      <section class="session-card card">
+        <div class="session-stat">
+          <span>采集时间</span>
+          <strong id="elapsedValue">0.0 s</strong>
+        </div>
+        <div class="session-stat">
+          <span>收到数据</span>
+          <strong id="packetCountValue">0 包</strong>
+        </div>
+        <div class="session-stat">
+          <span>实际刷新率</span>
+          <strong id="packetRateValue">0.0 Hz</strong>
+        </div>
+        <div class="session-actions">
+          <button id="clearButton" class="button">清空曲线</button>
+          <button id="exportButton" class="button" disabled>导出 CSV</button>
+        </div>
+      </section>
+
+      <section class="message-card card">
+        <span>运行信息</span>
+        <p id="messageText">请使用 Chrome 或 Edge 打开，并点击“连接 XIAO”。</p>
+      </section>
+    </main>
+
+    <footer>
+      网页只负责显示；开发板功耗由采样状态、BLE 连接参数和发送频率决定。
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
