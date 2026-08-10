@@ -412,7 +412,7 @@ function acceptRawPacket(packet, hostTime = new Date()) {
   const samples = rawPacketToSamples(packet, adcFullScaleV());
   for (const sample of samples) {
     points.push({
-      time: sample.timeS,
+      time: sample.acquisitionTimeS,
       rawVoltageV: sample.voltageV,
       adcCode: sample.adcCode,
     });
@@ -429,7 +429,7 @@ function acceptRawPacket(packet, hostTime = new Date()) {
   elements.windowMeanValue.textContent = String(last.adcCode);
   elements.acRmsValue.textContent = String(missing);
   elements.peakToPeakValue.textContent = rate.sampleRate.toFixed(1);
-  elements.elapsedValue.textContent = `${last.timeS.toFixed(3)} s`;
+  elements.elapsedValue.textContent = `${last.acquisitionTimeS.toFixed(3)} s`;
   elements.packetCountValue.textContent = `${rawReceivedSampleCount} 点 / ${csvRows.length} 行`;
   elements.exportButton.disabled = csvRows.length === 0;
 
