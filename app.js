@@ -6,16 +6,28 @@ import {
   MODE_CONTINUOUS,
   MODE_ONE_WINDOW,
   MODE_STANDBY,
+  RAW_CSV_HEADER,
+  RAW_SAMPLE_RATE_HZ,
   SERVICE_UUID,
   STATUS_UUID,
   decodeDataPacket,
+  decodeRawDataPacket,
   encodeMode,
+  isRawDataPacket,
   modeLabel,
   packetToCsvRow,
+  rawPacketToSamples,
+  rawSampleToCsvRow,
 } from "./ble_protocol.mjs";
 
-const MAX_CHART_POINTS = 2400;
+const MAX_CHART_POINTS = 10000;
 const MAX_CSV_ROWS = 100000;
+
+const calibrationLabel = document.createElement("label");
+calibrationLabel.className = "auto-stop";
+calibrationLabel.innerHTML =
+  'ADC满量程 <input id="adcFullScaleInput" type="number" min="0.1" max="3.6" step="0.001" value="3.300" /> V';
+document.querySelector(".mode-panel")?.append(calibrationLabel);
 
 const elements = Object.fromEntries(
   [
@@ -30,6 +42,7 @@ const elements = Object.fromEntries(
     "stopButton",
     "modeText",
     "autoStopCheckbox",
+    "adcFullScaleInput",
     "liveMeanValue",
     "windowMeanValue",
     "acRmsValue",
@@ -62,6 +75,13 @@ let points = [];
 let csvRows = [];
 let arrivalTimes = [];
 let drawPending = false;
+let protocolMode = "processed";
+let expectedRawPacketSequence = null;
+let expectedRawSampleIndex = null;
+let rawMissingPacketCount = 0;
+let rawMissingSampleCount = 0;
+let rawBufferOverrunCount = 0;
+let rawReceivedSampleCount = 0;
 
 function cssColor(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -201,6 +221,65 @@ const featureChart = new LineChart(
   "每完成一个 2 秒窗口后更新特征",
 );
 
+const metricCards = [...document.querySelectorAll(".metric-card")];
+const chartCards = [...document.querySelectorAll(".chart-card")];
+
+function setMetricCard(index, label, unit) {
+  const card = metricCards[index];
+  if (!card) return;
+  const labelNode = card.querySelector("span");
+  const unitNode = card.querySelector("small");
+  if (labelNode) labelNode.textContent = label;
+  if (unitNode) unitNode.textContent = unit;
+}
+
+function setProtocolMode(mode) {
+  protocolMode = mode;
+  const raw = mode === "raw";
+
+  setMetricCard(0, raw ? "最新原始电压" : "100 ms 均值", "V");
+  setMetricCard(1, raw ? "最新 ADC 原始码" : "2 s 窗口均值", raw ? "code" : "V");
+  setMetricCard(2, raw ? "检测到的丢点" : "交流 RMS", raw ? "点" : "V");
+  setMetricCard(3, raw ? "实测接收率" : "峰峰值", raw ? "Hz" : "V");
+
+  liveChart.series = [
+    { key: raw ? "rawVoltageV" : "liveMeanV", color: () => cssColor("--teal"), width: 2.2 },
+  ];
+  featureChart.series = raw
+    ? [{ key: "adcCode", color: () => cssColor("--orange"), width: 1.5 }]
+    : [
+        { key: "windowMeanV", color: () => cssColor("--green"), width: 1.8 },
+        { key: "acRmsV", color: () => cssColor("--purple"), width: 2 },
+        { key: "peakToPeakV", color: () => cssColor("--orange"), width: 2 },
+      ];
+
+  const liveTitle = chartCards[0]?.querySelector("h2");
+  const liveLegend = chartCards[0]?.querySelector(".legend");
+  const featureTitle = chartCards[1]?.querySelector("h2");
+  const featureLegend = chartCards[1]?.querySelector(".legends");
+  if (liveTitle) liveTitle.textContent = raw ? "原始 ADC 电压（500 Hz）" : "实时电压（100 ms 均值）";
+  if (liveLegend) liveLegend.textContent = raw ? "500 Hz 原始电压" : "100 ms 均值";
+  if (featureTitle) featureTitle.textContent = raw ? "ADC 原始码" : "窗口均值与交流特征";
+  if (featureLegend) {
+    featureLegend.textContent = raw ? "500 Hz 原始码" : "窗口均值 · 交流 RMS · 峰峰值";
+  }
+
+  const subtitle = document.querySelector(".subtitle");
+  if (subtitle) {
+    subtitle.textContent = raw
+      ? `${RAW_SAMPLE_RATE_HZ} Hz 原始 ADC · 二进制 BLE 全量传输 · 自动检测丢包`
+      : "低功耗待机 · 500 Hz 板端采样 · 10 Hz 特征传输";
+  }
+  elements.adcFullScaleInput.closest("label").hidden = !raw;
+  if (raw) elements.timeWindowSelect.value = "10";
+  scheduleDraw();
+}
+
+function adcFullScaleV() {
+  const value = Number(elements.adcFullScaleInput.value);
+  return Number.isFinite(value) && value > 0 ? value : 3.3;
+}
+
 function showMessage(message, isError = false) {
   elements.messageText.textContent = message;
   messageCard.classList.toggle("error", isError);
@@ -254,19 +333,29 @@ function scheduleDraw() {
   });
 }
 
-function updatePacketRate(now) {
-  arrivalTimes.push(now);
+function updatePacketRate(now, sampleCount = 1) {
+  arrivalTimes.push({ time: now, sampleCount });
   const cutoff = now - 3000;
-  arrivalTimes = arrivalTimes.filter((value) => value >= cutoff);
-  let rate = 0;
+  arrivalTimes = arrivalTimes.filter((value) => value.time >= cutoff);
+  let packetRate = 0;
+  let sampleRate = 0;
   if (arrivalTimes.length >= 2) {
-    rate = ((arrivalTimes.length - 1) * 1000) /
-      (arrivalTimes[arrivalTimes.length - 1] - arrivalTimes[0]);
+    const durationMs = arrivalTimes[arrivalTimes.length - 1].time - arrivalTimes[0].time;
+    packetRate = ((arrivalTimes.length - 1) * 1000) / durationMs;
+    const samples = arrivalTimes.slice(1).reduce((sum, item) => sum + item.sampleCount, 0);
+    sampleRate = (samples * 1000) / durationMs;
   }
-  elements.packetRateValue.textContent = `${rate.toFixed(1)} Hz`;
+  elements.packetRateValue.textContent = protocolMode === "raw"
+    ? `${sampleRate.toFixed(1)} 点/s（${packetRate.toFixed(1)} 包/s）`
+    : `${packetRate.toFixed(1)} Hz`;
+  return { packetRate, sampleRate };
 }
 
 function acceptPacket(packet, hostTime = new Date()) {
+  if (protocolMode !== "processed") {
+    clearSession();
+    setProtocolMode("processed");
+  }
   if (sessionOrigin === null || packet.acquisitionTimeS < sessionOrigin) {
     sessionOrigin = packet.acquisitionTimeS;
   }
@@ -288,9 +377,73 @@ function acceptPacket(packet, hostTime = new Date()) {
   scheduleDraw();
 }
 
+function resetRawTracking() {
+  expectedRawPacketSequence = null;
+  expectedRawSampleIndex = null;
+  rawMissingPacketCount = 0;
+  rawMissingSampleCount = 0;
+  rawBufferOverrunCount = 0;
+  rawReceivedSampleCount = 0;
+}
+
+function sequenceGap(expected, actual) {
+  return (actual - expected + 0x10000) & 0xffff;
+}
+
+function acceptRawPacket(packet, hostTime = new Date()) {
+  if (protocolMode !== "raw") {
+    clearSession();
+    setProtocolMode("raw");
+  } else if (packet.firstSampleIndex === 0 && rawReceivedSampleCount > 0) {
+    clearSession();
+  }
+
+  if (expectedRawPacketSequence !== null && packet.packetSequence !== expectedRawPacketSequence) {
+    rawMissingPacketCount += sequenceGap(expectedRawPacketSequence, packet.packetSequence);
+  }
+  if (expectedRawSampleIndex !== null && packet.firstSampleIndex > expectedRawSampleIndex) {
+    rawMissingSampleCount += packet.firstSampleIndex - expectedRawSampleIndex;
+  }
+  if ((packet.flags & 0x01) !== 0) rawBufferOverrunCount += 1;
+
+  expectedRawPacketSequence = (packet.packetSequence + 1) & 0xffff;
+  expectedRawSampleIndex = packet.firstSampleIndex + packet.sampleCount;
+
+  const samples = rawPacketToSamples(packet, adcFullScaleV());
+  for (const sample of samples) {
+    points.push({
+      time: sample.timeS,
+      rawVoltageV: sample.voltageV,
+      adcCode: sample.adcCode,
+    });
+    csvRows.push(rawSampleToCsvRow(hostTime.toISOString(), sample));
+  }
+  if (points.length > MAX_CHART_POINTS) points.splice(0, points.length - MAX_CHART_POINTS);
+  if (csvRows.length > MAX_CSV_ROWS) csvRows.splice(0, csvRows.length - MAX_CSV_ROWS);
+  rawReceivedSampleCount += samples.length;
+
+  const last = samples[samples.length - 1];
+  const missing = rawMissingSampleCount;
+  const rate = updatePacketRate(performance.now(), packet.sampleCount);
+  elements.liveMeanValue.textContent = formatVoltage(last.voltageV);
+  elements.windowMeanValue.textContent = String(last.adcCode);
+  elements.acRmsValue.textContent = String(missing);
+  elements.peakToPeakValue.textContent = rate.sampleRate.toFixed(1);
+  elements.elapsedValue.textContent = `${last.timeS.toFixed(3)} s`;
+  elements.packetCountValue.textContent = `${rawReceivedSampleCount} 点 / ${csvRows.length} 行`;
+  elements.exportButton.disabled = csvRows.length === 0;
+
+  if (rawBufferOverrunCount > 0) {
+    showMessage(`采集缓冲区已溢出 ${rawBufferOverrunCount} 次；请缩短距离或减少无线干扰。`, true);
+  }
+  scheduleDraw();
+}
+
 function onDataNotification(event) {
   try {
-    acceptPacket(decodeDataPacket(event.target.value));
+    const payload = event.target.value;
+    if (isRawDataPacket(payload)) acceptRawPacket(decodeRawDataPacket(payload));
+    else acceptPacket(decodeDataPacket(payload));
   } catch (error) {
     showMessage(`收到的数据包无法解析：${error.message}`, true);
   }
@@ -306,6 +459,7 @@ function clearSession() {
   csvRows = [];
   arrivalTimes = [];
   sessionOrigin = null;
+  resetRawTracking();
   elements.liveMeanValue.textContent = "—";
   elements.windowMeanValue.textContent = "—";
   elements.acRmsValue.textContent = "—";
@@ -313,6 +467,7 @@ function clearSession() {
   elements.elapsedValue.textContent = "0.0 s";
   elements.packetCountValue.textContent = "0 包";
   elements.packetRateValue.textContent = "0.0 Hz";
+  if (protocolMode === "raw") elements.packetCountValue.textContent = "0 点";
   elements.exportButton.disabled = true;
   scheduleDraw();
 }
@@ -357,6 +512,7 @@ async function connectBle() {
       optionalServices: [SERVICE_UUID],
     });
     device.addEventListener("gattserverdisconnected", onDisconnected);
+    setProtocolMode(device.name?.includes("Raw500") ? "raw" : "processed");
 
     const server = await device.gatt.connect();
     const service = await server.getPrimaryService(SERVICE_UUID);
@@ -451,6 +607,7 @@ function toggleDemo() {
     return;
   }
   demoMode = true;
+  setProtocolMode("processed");
   elements.demoButton.textContent = "退出演示";
   demoTime = 0;
   clearSession();
@@ -461,13 +618,16 @@ function toggleDemo() {
 
 function exportCsv() {
   if (csvRows.length === 0) return;
-  const content = `\ufeff${CSV_HEADER.join(",")}\r\n${csvRows.join("\r\n")}\r\n`;
+  const header = protocolMode === "raw" ? RAW_CSV_HEADER : CSV_HEADER;
+  const content = `\ufeff${header.join(",")}\r\n${csvRows.join("\r\n")}\r\n`;
   const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
   anchor.href = url;
-  anchor.download = `xiao_piezo_${stamp}.csv`;
+  anchor.download = protocolMode === "raw"
+    ? `xiao_piezo_raw500_${stamp}.csv`
+    : `xiao_piezo_${stamp}.csv`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -493,6 +653,10 @@ elements.stopButton.addEventListener("click", () => requestMode(MODE_STANDBY));
 elements.clearButton.addEventListener("click", clearSession);
 elements.exportButton.addEventListener("click", exportCsv);
 elements.timeWindowSelect.addEventListener("change", scheduleDraw);
+elements.adcFullScaleInput.addEventListener("change", () => {
+  clearSession();
+  showMessage("ADC 满量程已更新；新数据将按实测 3V3 电压换算。");
+});
 window.addEventListener("resize", scheduleDraw);
 
 document.addEventListener("visibilitychange", () => {
@@ -510,6 +674,7 @@ window.addEventListener("pagehide", () => {
 });
 
 checkCompatibility();
+setProtocolMode("processed");
 updateMode(MODE_STANDBY);
 scheduleDraw();
 

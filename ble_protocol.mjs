@@ -8,6 +8,9 @@ export const MODE_STANDBY = 0;
 export const MODE_CONTINUOUS = 1;
 export const MODE_ONE_WINDOW = 2;
 export const PACKET_BYTES = 20;
+export const RAW_PACKET_MAGIC = 0xa55a;
+export const RAW_SAMPLE_RATE_HZ = 500;
+export const RAW_SAMPLES_PER_PACKET = 5;
 
 export const CSV_HEADER = [
   "host_time_iso",
@@ -16,6 +19,16 @@ export const CSV_HEADER = [
   "window_mean_v",
   "ac_rms_v",
   "peak_to_peak_v",
+];
+
+export const RAW_CSV_HEADER = [
+  "host_time_iso",
+  "sample_index",
+  "acquisition_time_s",
+  "adc_code",
+  "voltage_v",
+  "packet_sequence",
+  "packet_flags",
 ];
 
 function asDataView(payload) {
@@ -52,6 +65,64 @@ export function decodeDataPacket(payload) {
   };
 }
 
+export function isRawDataPacket(payload) {
+  const view = asDataView(payload);
+  return view.byteLength === PACKET_BYTES &&
+    view.getUint16(0, true) === RAW_PACKET_MAGIC;
+}
+
+export function decodeRawDataPacket(payload) {
+  const view = asDataView(payload);
+  if (view.byteLength !== PACKET_BYTES) {
+    throw new RangeError(
+      `BLE raw packet must be ${PACKET_BYTES} bytes, got ${view.byteLength}`,
+    );
+  }
+  const magic = view.getUint16(0, true);
+  if (magic !== RAW_PACKET_MAGIC) {
+    throw new RangeError(`Unexpected raw packet magic: 0x${magic.toString(16)}`);
+  }
+
+  const sampleCount = view.getUint8(8);
+  if (sampleCount < 1 || sampleCount > RAW_SAMPLES_PER_PACKET) {
+    throw new RangeError(`Invalid raw sample count: ${sampleCount}`);
+  }
+
+  const samples = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const adcCode = view.getUint16(10 + index * 2, true);
+    if (adcCode > 4095) {
+      throw new RangeError(`ADC code exceeds 12-bit range: ${adcCode}`);
+    }
+    samples.push(adcCode);
+  }
+
+  return {
+    packetSequence: view.getUint16(2, true),
+    firstSampleIndex: view.getUint32(4, true),
+    sampleCount,
+    flags: view.getUint8(9),
+    samples,
+  };
+}
+
+export function rawPacketToSamples(packet, adcFullScaleV = 3.3) {
+  if (!Number.isFinite(adcFullScaleV) || adcFullScaleV <= 0) {
+    throw new RangeError("ADC full-scale voltage must be positive");
+  }
+  return packet.samples.map((adcCode, offset) => {
+    const sampleIndex = packet.firstSampleIndex + offset;
+    return {
+      sampleIndex,
+      acquisitionTimeS: sampleIndex / RAW_SAMPLE_RATE_HZ,
+      adcCode,
+      voltageV: (adcCode * adcFullScaleV) / 4095,
+      packetSequence: packet.packetSequence,
+      packetFlags: packet.flags,
+    };
+  });
+}
+
 export function modeLabel(mode) {
   switch (mode) {
     case MODE_STANDBY:
@@ -78,6 +149,20 @@ export function packetToCsvRow(hostTimeIso, packet) {
     packet.windowMeanV,
     packet.acRmsV,
     packet.peakToPeakV,
+  ]
+    .map(csvEscape)
+    .join(",");
+}
+
+export function rawSampleToCsvRow(hostTimeIso, sample) {
+  return [
+    hostTimeIso,
+    sample.sampleIndex,
+    sample.acquisitionTimeS,
+    sample.adcCode,
+    sample.voltageV,
+    sample.packetSequence,
+    sample.packetFlags,
   ]
     .map(csvEscape)
     .join(",");
