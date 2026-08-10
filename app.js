@@ -18,7 +18,7 @@ import {
   packetToCsvRow,
   rawPacketToSamples,
   rawSampleToCsvRow,
-} from "./ble_protocol.mjs";
+} from "./ble_protocol.mjs?v=20260810-raw500-2";
 
 const MAX_CHART_POINTS = 10000;
 const MAX_CSV_ROWS = 100000;
